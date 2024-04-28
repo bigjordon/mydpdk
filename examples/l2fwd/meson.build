@@ -11,3 +11,9 @@ allow_experimental_apis = true
 sources = files(
         'main.c',
 )
+if dpdk_conf.has('RTE_LIB_GRO')
+    deps += 'gro'
+endif
+if dpdk_conf.has('RTE_LIB_GSO')
+    deps += 'gso'
+endif
