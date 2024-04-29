@@ -1,0 +1,154 @@
+************ first do *************
+mkdir -p /dev/hugepages
+mountpoint -q /dev/hugepages || mount -t hugetlbfs nodev /dev/hugepages
+echo 64 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
+echo 1 > /sys/module/vfio/parameters/enable_unsafe_noiommu_mode
+
+net_pcap 依赖libpcap-dev包，要使用net_pcap需要安装这个包 apt install libpcap-dev
+meson -Dexamples=all build
+
+cd build 打开调试
+meson configure -Dbuildtype=debug
+
+ninja -C build
+
+重新配置
+
+meson --reconfigure -Dexamples=all build
+
+
+# run new
+
+./usertools/dpdk-devbind.py --bind=vfio-pci 0000:00:09.0 0000:00:0a.0
+
+## resore
+sudo ./usertools/dpdk-devbind.py -u 0000:00:09.0 0000:00:0a.0
+sudo ./usertools/dpdk-devbind.py --bind=e1000 0000:00:09.0 0000:00:0a.0
+sudo ip l set dev enp0s9 up
+sudo ip l set dev enp0s1o up
+
+
+################################
+# test-pmd
+  start 
+  start tx_first 1
+  show fwd stats all
+################################
+
+
+#################################
+## 这个使用网桥的方式会发一堆ND包，好像是环了 因为testpmd中会将接口enp0s9中收到的数据发给送enp0s10
+## 试一试接口设置上NOARP是什么效果 sudo ip link set dpbr arp off 没有ND报文了，还有其他组播报文
+## 试一下打来stp协议 sudo brctl stp dpbr on 这个也不行
+## sudo build/app/dpdk-testpmd -c7 --vdev='net_pcap0,iface=enp0s9' --vdev='net_pcap1,iface=enp0s10' -- -i --nb-cores=2 --nb-ports=2 --total-num-mbufs=2048
+## brctl addbr dpbr
+## ip l set dev dpbr up
+## brctl addif dpbr enp0s9
+## brctl addif dpbr enp0s10
+#####################################
+
+## 方式二 直接绑定enp0s9 enp0s10 这两个是virtualBox的internal方式网卡
+   *** 在虚拟机上的网络配置打开者两个接口的混杂模式*** VB 的 internal 网桥会转发数据
+
+sudo ip l set dev enp0s9 down
+sudo ip l set dev enp0s10 down
+sudo ./usertools/dpdk-devbind.py --bind=vfio-pci 0000:00:09.0 0000:00:0a.0
+sudo build/app/dpdk-testpmd -c7  -- -i --nb-cores=2 --nb-ports=2 --total-num-mbufs=2048
+再起一个终端可以对enp0s9抓包
+sudo ./build/app/dpdk-dumpcap --list-interfaces
+sudo ./build/app/dpdk-dumpcap -i 0000:00:0a.0
+
+show fwd stats all
+show port info 0/all
+
+## 方式三
+这种跑的也是挺好的
+sudo build/app/dpdk-testpmd -c7 --vdev='net_pcap0,iface=vm1' --vdev='net_pcap1,iface=vm2' -- -i --nb-cores=2 --nb-ports=2 --total-num-mbufs=2048
+ip link add dev vm1 type veth peer name vm2
+ip l set dev vm1 up
+ip l set dev vm2 up
+
+
+
+
+
+
+
+##############################################################################################################################################################
+##############################################################################################################################################################
+
+Message:
+===============
+Drivers Enabled
+===============
+
+common:
+	cpt, dpaax, iavf, idpf, octeontx, cnxk, nfp, qat,
+	sfc_efx,
+bus:
+	auxiliary, cdx, dpaa, fslmc, ifpga, pci, platform, vdev,
+	vmbus,
+mempool:
+	bucket, cnxk, dpaa, dpaa2, octeontx, ring, stack,
+dma:
+	cnxk, dpaa, dpaa2, hisilicon, idxd, ioat, skeleton,
+net:
+	af_packet, ark, atlantic, avp, axgbe, bnx2x, bnxt, bond,
+	cnxk, cpfl, cxgbe, dpaa, dpaa2, e1000, ena, enetc,
+	enetfec, enic, failsafe, fm10k, gve, hinic, hns3, i40e,
+	iavf, ice, idpf, igc, ionic, ixgbe, memif, netvsc,
+	nfp, ngbe, null, octeontx, octeon_ep, pcap, pfe, qede,
+	ring, sfc, softnic, tap, thunderx, txgbe, vdev_netvsc, vhost,
+	virtio, vmxnet3,
+raw:
+	cnxk_bphy, cnxk_gpio, dpaa2_cmdif, ntb, skeleton,
+crypto:
+	bcmfs, caam_jr, ccp, cnxk, dpaa_sec, dpaa2_sec, nitrox, null,
+	octeontx, openssl, scheduler, virtio,
+compress:
+	octeontx, zlib,
+regex:
+	cn9k,
+ml:
+	cnxk,
+vdpa:
+	ifc, nfp, sfc,
+event:
+	cnxk, dlb2, dpaa, dpaa2, dsw, opdl, skeleton, sw,
+	octeontx,
+baseband:
+	acc, fpga_5gnr_fec, fpga_lte_fec, la12xx, null, turbo_sw,
+gpu: 
+
+
+===========================
+qos-meter
+                                           // 使用一个网卡收发报文
+build/examples/dpdk-qos_meter -c 1 -n 4 -- -p 0x1
+
+另一个接口绑定kernel， 两个接口还是在virtualBox中internel模式，打开混在
+改接口配置一个IP，例如11.11.11.11 然后ping 11.11.11.12 就会广播arp
+build/examples/dpdk-qos_meter 会收到一个包
+
+
+这个特性需要PMD driver的支持
+  https://doc.dpdk.org/guides/nics/overview.html  find metering
+  https://doc.dpdk.org/guides/nics/mvpp2.html#features
+mvpp2就是支持这个特性的
+
+
+
+
+
+=================================
+l2forward
+./dpdk/build/examples/dpdk-l2fwd -c7 -- -p0x3 -P
+
+
+================================
+l3forward
+
+debug: tx_descriptor status not DD
+       break em_xmit_cleanup to see
+
+
