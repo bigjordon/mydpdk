@@ -45,20 +45,20 @@
                               ((unsigned)((unsigned char *)ip)[2]), \
                               ((unsigned)((unsigned char *)ip)[3])
 
-void _dumpPacket(char *);
-void _dumpPacket(char *data) {
+void _dumpPacket(char *data, const char *label);
+void _dumpPacket(char *data, const char *label) {
 	struct rte_ether_hdr *eth = (struct rte_ether_hdr*)data;
 	struct rte_ipv4_hdr *iph =(struct rte_ipv4_hdr*)(data + sizeof(struct rte_ether_hdr)); 
-	printf("MAC src: " RTE_ETHER_ADDR_PRT_FMT "\n", RTE_ETHER_ADDR_BYTES(&eth->src_addr));
-	printf("MAC dst: " RTE_ETHER_ADDR_PRT_FMT "\n", RTE_ETHER_ADDR_BYTES(&eth->dst_addr));
-	printf("IP src: " IPQUAD_FMT "\n", IPQUAD_PTR_BYTES(&iph->src_addr));
-	printf("IP dst: " IPQUAD_FMT "\n", IPQUAD_PTR_BYTES(&iph->dst_addr));
+	printf("%s MAC src: " RTE_ETHER_ADDR_PRT_FMT "\n", label, RTE_ETHER_ADDR_BYTES(&eth->src_addr));
+	printf("%s MAC dst: " RTE_ETHER_ADDR_PRT_FMT "\n", label, RTE_ETHER_ADDR_BYTES(&eth->dst_addr));
+	printf("%s IP src: " IPQUAD_FMT "\n", label, IPQUAD_PTR_BYTES(&iph->src_addr));
+	printf("%s IP dst: " IPQUAD_FMT "\n", label, IPQUAD_PTR_BYTES(&iph->dst_addr));
 }
 
-void dumpPacket(struct rte_mbuf*);
-void dumpPacket(struct rte_mbuf* packet ){
+void dumpPacket(struct rte_mbuf* packet, const char *label);
+void dumpPacket(struct rte_mbuf* packet, const char *label){
 	char *addr = (char *)(packet->buf_addr) + packet->data_off;
-	_dumpPacket(addr);
+	_dumpPacket(addr, label);
 }
 
 
@@ -416,7 +416,7 @@ int nb_pkt_per_burst = MAX_PKT_BURST;
 	    .rx_queue= 0,  
 	    .tx_port = 1,  
 	    .tx_queue = 0, 
-	    .peer_addr = 1,
+	    .peer_addr = 0,
 	    .disabled = false,
 
 	    .retry_enabled = true,
@@ -454,8 +454,8 @@ pkt_burst_transmit(void)
 	/*
 	 * Initialize Ethernet header.
 	 */
-	rte_ether_addr_copy(&l2fwd_ports_eth_addr[fs->peer_addr], &eth_hdr.dst_addr);
-	rte_ether_addr_copy(&l2fwd_ports_eth_addr[fs->peer_addr], &eth_hdr.src_addr);
+	rte_ether_addr_copy(&l2fwd_ports_eth_addr[fs->rx_port], &eth_hdr.dst_addr);
+	rte_ether_addr_copy(&l2fwd_ports_eth_addr[fs->tx_port], &eth_hdr.src_addr);
 	eth_hdr.ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
 
 	if (rte_mempool_get_bulk(mbp, (void **)pkts_burst,nb_pkt_per_burst) == 0) {
@@ -777,7 +777,7 @@ l2fwd_main_loop(void)
 				continue;
 
 			printf("recv: ---port: %d, %d \n", portid, nb_rx);
-			dumpPacket(pkts_burst[0]);
+			dumpPacket(pkts_burst[0], __FUNCTION__);
 
 			port_statistics[portid].rx += nb_rx;
 
@@ -1149,7 +1149,7 @@ my_error_callback(struct rte_mbuf **pkts, uint16_t unsent,
     int i = 0;
 
     for (i=0; i<unsent; i++) {
-	    dumpPacket(pkts[i]);
+	    dumpPacket(pkts[i], __FUNCTION__);
     }
 }
 
