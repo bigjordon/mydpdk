@@ -513,7 +513,7 @@ common_fwd_stream_transmit(struct fwd_stream *fs, struct rte_mbuf **burst,
 		fs->fwd_dropped += (nb_pkts - nb_tx);
 		rte_pktmbuf_free_bulk(&burst[nb_tx], nb_pkts - nb_tx);
 	}
-
+	printf("***%s** port %d queue %d retries %d times to send %d of %d pkt\n", __func__, fs->tx_port, fs->tx_queue, retry, nb_tx, nb_pkts);
 	return nb_tx;
 }
 

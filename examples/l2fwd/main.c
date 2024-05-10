@@ -38,6 +38,30 @@
 #include <rte_mbuf.h>
 #include <rte_string_fns.h>
 
+/* Per-port statistics struct */
+bool debug = false;
+struct dropped_ext {
+	uint64_t dropped;
+	uint16_t port_id;
+       	uint16_t queue_id;
+};
+struct l2fwd_port_statistics {
+	uint64_t tx;
+	uint64_t rx;
+	uint64_t dropped;
+	uint16_t port_id;
+       	uint16_t queue_id;
+} __rte_cache_aligned;
+
+struct tx_timestamp {
+	rte_be32_t signature;
+	rte_be16_t pkt_idx;
+	rte_be16_t queue_idx;
+	rte_be64_t ts;
+};
+
+struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
+
 #define IPQUAD_FMT "%u.%u.%u.%u"
 
 #define  IPQUAD_PTR_BYTES(ip) ((unsigned)((unsigned char *)ip)[0]), \
@@ -49,25 +73,34 @@ void _dumpPacket(char *data, const char *label);
 void _dumpPacket(char *data, const char *label) {
 	struct rte_ether_hdr *eth = (struct rte_ether_hdr*)data;
 	struct rte_ipv4_hdr *iph =(struct rte_ipv4_hdr*)(data + sizeof(struct rte_ether_hdr)); 
+	struct tx_timestamp *payload =(struct tx_timestamp*)(data + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr)); 
+
 	printf("%s MAC src: " RTE_ETHER_ADDR_PRT_FMT "\n", label, RTE_ETHER_ADDR_BYTES(&eth->src_addr));
 	printf("%s MAC dst: " RTE_ETHER_ADDR_PRT_FMT "\n", label, RTE_ETHER_ADDR_BYTES(&eth->dst_addr));
 	printf("%s IP src: " IPQUAD_FMT "\n", label, IPQUAD_PTR_BYTES(&iph->src_addr));
 	printf("%s IP dst: " IPQUAD_FMT "\n", label, IPQUAD_PTR_BYTES(&iph->dst_addr));
+	printf("UDP PAYLOAD: %ld\n", rte_be_to_cpu_64(payload->ts));
 }
 
 void dumpPacket(struct rte_mbuf* packet, const char *label);
 void dumpPacket(struct rte_mbuf* packet, const char *label){
+	if (!debug) return;
 	char *addr = (char *)(packet->buf_addr) + packet->data_off;
+	printf("-----start----\npkt rte_mbuf buf_addr: %p, buf_iova: %lx\n",
+		packet->buf_addr, packet->buf_iova);
 	_dumpPacket(addr, label);
+	printf("-----end----\n");
 }
 
 
 struct rte_mempool * l2fwd_pktmbuf_pool = NULL;
-struct rte_mempool * l2fwd_burst_pool = NULL;
+struct rte_mempool * l2fwd_burst_pool = NULL; /* my: no use change to l2fwd_pktmbuf_pool */
 static volatile bool force_quit;
+static long g_count = 2000;
 
 /* MAC updating enabled by default */
-static int mac_updating = 1;
+// static int mac_updating = 1;
+static int mac_updating = 0; /* my: change default to 0 */
 
 /* Ports set in promiscuous mode off by default. */
 static int promiscuous_on;
@@ -106,7 +139,7 @@ static uint16_t nb_port_pair_params;
 
 static unsigned int l2fwd_rx_queue_per_lcore = 1;
 
-/**** my start ***/
+/**** my: start ***/
 #include <unistd.h>
 
 #include <sys/queue.h>
@@ -122,12 +155,6 @@ static unsigned int l2fwd_rx_queue_per_lcore = 1;
 
 #include "testpmd.h"
 
-struct tx_timestamp {
-	rte_be32_t signature;
-	rte_be16_t pkt_idx;
-	rte_be16_t queue_idx;
-	rte_be64_t ts;
-};
 
 /* use RFC863 Discard Protocol */
 uint16_t tx_udp_src_port = 9;
@@ -145,8 +172,6 @@ static struct rte_udp_hdr pkt_udp_hdr; /**< UDP header of tx packets. */
 
 static uint64_t timestamp_mask; /**< Timestamp dynamic flag mask */
 static int32_t timestamp_off; /**< Timestamp dynamic field offset */
-static bool timestamp_enable; /**< Timestamp enable */
-static uint64_t timestamp_initial[RTE_MAX_ETHPORTS];
 
 static void
 copy_buf_to_pkt_segs(void* buf, unsigned len, struct rte_mbuf *pkt,
@@ -277,7 +302,7 @@ static inline bool
 pkt_burst_prepare(struct rte_mbuf *pkt, struct rte_mempool *mbp,
 		struct rte_ether_hdr *eth_hdr, const uint16_t vlan_tci,
 		const uint16_t vlan_tci_outer, const uint64_t ol_flags,
-		const uint16_t idx, struct fwd_stream *fs)
+		__rte_unused const uint16_t idx, __rte_unused struct fwd_stream *fs)
 {
 	struct rte_mbuf *pkt_segs[RTE_MAX_SEGS_PER_PKT];
 	struct rte_mbuf *pkt_seg;
@@ -344,72 +369,25 @@ pkt_burst_prepare(struct rte_mbuf *pkt, struct rte_mempool *mbp,
 		RTE_PER_LCORE(_src_port_var) = src_var;
 	}
 
-
-	if (unlikely(timestamp_enable)) {
-		uint64_t skew = fs->ts_skew;
-		struct tx_timestamp timestamp_mark;
-
-		if (unlikely(!skew)) {
-			struct rte_eth_dev_info dev_info;
-			unsigned int txqs_n;
-			uint64_t phase;
-			int ret;
-
-			ret = eth_dev_info_get_print_err(fs->tx_port, &dev_info);
-			if (ret != 0) {
-				TESTPMD_LOG(ERR,
-					"Failed to get device info for port %d,"
-					"could not finish timestamp init",
-					fs->tx_port);
-				return false;
-			}
-			txqs_n = dev_info.nb_tx_queues;
-			phase = 1* fs->tx_queue /
-					 (txqs_n ? txqs_n : 1);
-			/*
-			 * Initialize the scheduling time phase shift
-			 * depending on queue index.
-			 */
-			skew = timestamp_initial[fs->tx_port] +
-			       1+ phase;
-			fs->ts_skew = skew;
-		}
-		timestamp_mark.pkt_idx = rte_cpu_to_be_16(idx);
-		timestamp_mark.queue_idx = rte_cpu_to_be_16(fs->tx_queue);
-		timestamp_mark.signature = rte_cpu_to_be_32(0xBEEFC0DE);
-		if (unlikely(!idx)) {
-			skew +=	1;
-			pkt->ol_flags |= timestamp_mask;
-			*RTE_MBUF_DYNFIELD
-				(pkt, timestamp_off, uint64_t *) = skew;
-			fs->ts_skew = skew;
-			timestamp_mark.ts = rte_cpu_to_be_64(skew);
-		} else if (false) {
-			skew +=	1;
-			pkt->ol_flags |= timestamp_mask;
-			*RTE_MBUF_DYNFIELD
-				(pkt, timestamp_off, uint64_t *) = skew;
-			fs->ts_skew = skew;
-			timestamp_mark.ts = rte_cpu_to_be_64(skew);
-		} else {
-			timestamp_mark.ts = RTE_BE64(0);
-		}
-		copy_buf_to_pkt(&timestamp_mark, sizeof(timestamp_mark), pkt,
-			sizeof(struct rte_ether_hdr) +
-			sizeof(struct rte_ipv4_hdr) +
-			sizeof(pkt_udp_hdr));
-	}
 	/*
 	 * Complete first mbuf of packet and append it to the
 	 * burst of packets to be transmitted.
 	 */
+
+	// my: time_stamp
+	struct tx_timestamp timestamp_mark;	
+	timestamp_mark.ts = rte_cpu_to_be_64(g_count++);
+	copy_buf_to_pkt(&timestamp_mark, sizeof(timestamp_mark), pkt,
+		sizeof(struct rte_ether_hdr) +
+		sizeof(struct rte_ipv4_hdr) +
+		sizeof(pkt_udp_hdr));
+
 	pkt->nb_segs = nb_segs;
 	pkt->pkt_len = pkt_len;
 
 	return true;
 }
 struct rte_mempool *pools[2] ;
-int nb_pkt_per_burst = MAX_PKT_BURST;
 
 	struct fwd_stream gfs = {
 	    .rx_port = 0,   
@@ -438,7 +416,10 @@ int nb_pkt_per_burst = MAX_PKT_BURST;
 static bool
 pkt_burst_transmit(void)
 {
-	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+	// my: i am debuging it must bigger than or equal to 63  ??why	
+	// but better start from 64, since 63 will cause 1 packet send failed to retry
+	int nb_pkt_per_burst = MAX_PKT_BURST*2;
+	struct rte_mbuf *pkts_burst[nb_pkt_per_burst];
 	struct rte_mbuf *pkt;
 	struct rte_mempool *mbp;
 	struct rte_ether_hdr eth_hdr;
@@ -448,8 +429,9 @@ pkt_burst_transmit(void)
 	uint64_t ol_flags = 0;
 	struct fwd_stream *fs = &gfs;
 
-	// my
-	mbp = l2fwd_burst_pool;
+	// my:
+	// mbp = l2fwd_burst_pool;
+	 mbp = l2fwd_pktmbuf_pool;
 
 	/*
 	 * Initialize Ethernet header.
@@ -469,7 +451,12 @@ pkt_burst_transmit(void)
 						(void **)&pkts_burst[nb_pkt],
 						nb_pkt_per_burst - nb_pkt);
 				break;
-			}
+			} 
+			printf("send pkt rte_mbuf buf_addr: %p, buf_iova: %lx\n",
+				pkts_burst[nb_pkt]->buf_addr, pkts_burst[nb_pkt]->buf_iova );
+
+			struct tx_timestamp *payload =(struct tx_timestamp*)((char*)(pkts_burst[nb_pkt]->buf_addr) + pkts_burst[nb_pkt]->data_off + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr)); 
+			printf("UDP PAYLOAD: %ld\n", rte_be_to_cpu_64(payload->ts));
 		}
 	} else {
 		for (nb_pkt = 0; nb_pkt < nb_pkt_per_burst; nb_pkt++) {
@@ -504,12 +491,13 @@ pkt_burst_transmit(void)
 			       (unsigned) nb_pkt, (unsigned) nb_tx,
 			       (unsigned) (nb_pkt - nb_tx));
 	}
+	port_statistics[fs->tx_port].tx += nb_tx;
 
 	return true;
 }
 
 static int
-tx_only_begin(portid_t pi)
+tx_only_begin(__rte_unused portid_t pi)
 {
 	uint16_t pkt_hdr_len, pkt_data_len;
 	int dynf;
@@ -522,7 +510,6 @@ tx_only_begin(portid_t pi)
 
 	setup_pkt_udp_ip_headers(&pkt_ip_hdr, &pkt_udp_hdr, pkt_data_len);
 
-	timestamp_enable = false;
 	timestamp_mask = 0;
 	timestamp_off = -1;
 	dynf = rte_mbuf_dynflag_lookup
@@ -533,40 +520,13 @@ tx_only_begin(portid_t pi)
 				(RTE_MBUF_DYNFIELD_TIMESTAMP_NAME, NULL);
 	if (dynf >= 0)
 		timestamp_off = dynf;
-	timestamp_enable = 1&&
-			   timestamp_mask &&
-			   timestamp_off >= 0 &&
-			   !rte_eth_read_clock(pi, &timestamp_initial[pi]);
-
-	if (timestamp_enable) {
-		pkt_hdr_len += sizeof(struct tx_timestamp);
-
-		{
-		uint16_t total = 0;
-		uint8_t i;
-
-		for (i = 0; i < tx_pkt_nb_segs; i++) {
-			total += 64;
-			if (total >= pkt_hdr_len)
-				break;
-		}
-
-		if (total < pkt_hdr_len) {
-			TESTPMD_LOG(ERR,
-				    "Not enough Tx segment space for time stamp info, "
-				    "total %u < %u (needed)\n",
-				    total, pkt_hdr_len);
-			return -EINVAL;
-		}
-		}
-	}
 
 	/* Make sure all settings are visible on forwarding cores.*/
 	rte_wmb();
 	return 0;
 }
 
-/**** my end ***/
+/**** my: end ***/
 
 
 
@@ -590,13 +550,6 @@ static struct rte_eth_conf port_conf = {
 };
 
 
-/* Per-port statistics struct */
-struct l2fwd_port_statistics {
-	uint64_t tx;
-	uint64_t rx;
-	uint64_t dropped;
-} __rte_cache_aligned;
-struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 
 #define MAX_TIMER_PERIOD 86400 /* 1 day max */
 /* A tsc-based timer responsible for triggering statistics printout */
@@ -776,7 +729,7 @@ l2fwd_main_loop(void)
 			if (unlikely(nb_rx == 0))
 				continue;
 
-			printf("recv: ---port: %d, %d \n", portid, nb_rx);
+			if (debug) printf("recv: ---port: %d, %d \n", portid, nb_rx);
 			dumpPacket(pkts_burst[0], __FUNCTION__);
 
 			port_statistics[portid].rx += nb_rx;
@@ -1145,12 +1098,32 @@ void
 my_error_callback(struct rte_mbuf **pkts, uint16_t unsent,
         void *userdata)
 {
-    rte_eth_tx_buffer_count_callback(pkts, unsent, userdata);
-    int i = 0;
+	struct dropped_ext *ext = userdata;
+	uint16_t retry = 0;
+	uint16_t burst_tx_retry_num = 64;
+	uint16_t nb_pkts = unsent;
+	uint16_t nb_tx = 0;
+	while (nb_tx < nb_pkts && retry < burst_tx_retry_num) {
+		rte_delay_us(1000);
+		nb_tx += rte_eth_tx_burst(ext->port_id, ext->queue_id,
+			&pkts[nb_tx], nb_pkts - nb_tx);
+		retry++;
+	}
+	printf("**%s** retry %d times send %d of %d unsent pkts\n", __func__, retry, nb_tx, unsent);
+	unsent = nb_pkts - nb_tx;
+	if (unsent > 0) {
+		pkts = &pkts[nb_tx];
 
-    for (i=0; i<unsent; i++) {
-	    dumpPacket(pkts[i], __FUNCTION__);
-    }
+	} else {
+		return;
+	}
+
+	rte_eth_tx_buffer_count_callback(pkts, unsent, userdata);
+	int i = 0;
+
+	for (i=0; i<unsent; i++) {
+		dumpPacket(pkts[i], __FUNCTION__);
+	}
 }
 
 int
@@ -1274,7 +1247,7 @@ main(int argc, char **argv)
 	}
 
 	nb_mbufs = RTE_MAX(nb_ports * (nb_rxd + nb_txd + MAX_PKT_BURST +
-		nb_lcores * MEMPOOL_CACHE_SIZE), 8192U);
+		nb_lcores * MEMPOOL_CACHE_SIZE) /* my: same pool */ + MAX_PKT_BURST /* my: for txonly buffer*/  , 8192U);
 
 	/* Create the mbuf pool. 8< */
 	l2fwd_pktmbuf_pool = rte_pktmbuf_pool_create("mbuf_pool", nb_mbufs,
@@ -1285,6 +1258,8 @@ main(int argc, char **argv)
 	/* >8 End of create the mbuf pool. */
 
 
+	/* initialize port stats */
+	memset(&port_statistics, 0, sizeof(port_statistics));
 	/* Initialise each port */
 	RTE_ETH_FOREACH_DEV(portid) {
 		struct rte_eth_rxconf rxq_conf;
@@ -1369,6 +1344,8 @@ main(int argc, char **argv)
 
 		rte_eth_tx_buffer_init(tx_buffer[portid], MAX_PKT_BURST);
 
+		// my:
+		port_statistics[portid].port_id = portid;
 		ret = rte_eth_tx_buffer_set_err_callback(tx_buffer[portid],
 				my_error_callback,
 				&port_statistics[portid].dropped);
@@ -1401,8 +1378,6 @@ main(int argc, char **argv)
 			portid,
 			RTE_ETHER_ADDR_BYTES(&l2fwd_ports_eth_addr[portid]));
 
-		/* initialize port stats */
-		memset(&port_statistics, 0, sizeof(port_statistics));
 	}
 
 	if (!nb_ports_available) {
@@ -1412,14 +1387,16 @@ main(int argc, char **argv)
 
 	check_all_ports_link_status(l2fwd_enabled_port_mask);
 
-	// my
+	// my:
 	tx_only_begin(0);
 
+	/* my: change to l2fwd_pktmbuf_pool
 	l2fwd_burst_pool= rte_pktmbuf_pool_create("burst_pool", 2*MEMPOOL_CACHE_SIZE,
 		MEMPOOL_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE,
 		rte_socket_id());
 	if (l2fwd_burst_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init burst mbuf pool\n");
+	*/
 
 	pkt_burst_transmit();
 

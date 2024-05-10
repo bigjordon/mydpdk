@@ -6430,9 +6430,12 @@ rte_eth_tx_burst(uint16_t port_id, uint16_t queue_id,
 	}
 #endif
 
+	// int old_nb_pkts = nb_pkts;
+
 	nb_pkts = p->tx_pkt_burst(qd, tx_pkts, nb_pkts);
 
 	rte_ethdev_trace_tx_burst(port_id, queue_id, (void **)tx_pkts, nb_pkts);
+	//printf("^^^%s^^^ port: %u, queue: %u(%p) send %u of %u pkts\n", __func__, port_id, queue_id,qd, nb_pkts, old_nb_pkts);
 	return nb_pkts;
 }
 
