@@ -416,8 +416,8 @@ struct rte_mempool *pools[2] ;
 static bool
 pkt_burst_transmit(void)
 {
-	// my: i am debuging it must bigger than or equal to 63  ??why	
-	// but better start from 64, since 63 will cause 1 packet send failed to retry
+	// my: i am debuging it must multi of  MAX_PKT_BURST packet
+	// or some will send failed
 	int nb_pkt_per_burst = MAX_PKT_BURST*2;
 	struct rte_mbuf *pkts_burst[nb_pkt_per_burst];
 	struct rte_mbuf *pkt;
